@@ -199,7 +199,7 @@ typedef struct {
     Uint reserve_size;
     Uint len;
     int flags;
-    int item_ix[1]; /* of len size in reality... */
+    ErtsPiItem item[1]; /* of len size in reality... */
 } ErtsProcessInfoSig;
 
 #define ERTS_PROC_SIG_PI_MSGQ_LEN_IGNORE        ((Sint) -1)
@@ -1669,7 +1669,7 @@ erts_proc_sig_send_is_alive_request(Process *c_p, Eterm to, Eterm ref)
 int
 erts_proc_sig_send_process_info_request(Process *c_p,
                                         Eterm to,
-                                        int *item_ix,
+                                        ErtsPiItem *item,
                                         int len,
                                         int need_msgq_len,
                                         int flags,
@@ -1681,7 +1681,7 @@ erts_proc_sig_send_process_info_request(Process *c_p,
     int res;
 
     ASSERT(c_p);
-    ASSERT(item_ix);
+    ASSERT(item);
     ASSERT(len > 0);
     ASSERT(is_internal_ordinary_ref(ref));
 
@@ -1707,9 +1707,10 @@ erts_proc_sig_send_process_info_request(Process *c_p,
     pis->reserve_size = reserve_size;
     pis->len = len;
     pis->flags = flags;
-    sys_memcpy((void *) &pis->item_ix[0],
-               (void *) item_ix,
-               sizeof(int)*len);
+    /* FIXME: permit boxed values for item[].arg */
+    sys_memcpy((void *) &pis->item[0],
+               (void *) item,
+               sizeof(item[0]) * len);
     res = proc_queue_signal(c_p, to, (ErtsSignal *) pis,
                             ERTS_SIG_Q_OP_PROCESS_INFO);
     if (res)
@@ -3061,7 +3062,7 @@ handle_process_info(Process *c_p, ErtsSigRecvTracing *tracing,
             erts_factory_selfcontained_message_init(&hfact, mp, &hfrag->mem[0]);
 
             res = erts_process_info(c_p, &hfact, c_p, ERTS_PROC_LOCK_MAIN,
-                                    pisig->item_ix, pisig->len,
+                                    pisig->item, pisig->len,
                                     pisig->flags, reserve_size, &reds);
 
             hp = erts_produce_heap(&hfact,
