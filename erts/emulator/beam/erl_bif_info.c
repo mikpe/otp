@@ -742,10 +742,10 @@ collect_one_suspend_monitor(ErtsMonitor *mon, void *vsmicp, Sint reds)
 
 #define ERTS_PI_FLAG_SINGELTON                          (1 << 0)
 #define ERTS_PI_FLAG_ALWAYS_WRAP                        (1 << 1)
-#define ERTS_PI_FLAG_WANT_MSGS                          (1 << 2)
-#define ERTS_PI_FLAG_NEED_MSGQ_LEN                      (1 << 3)
-#define ERTS_PI_FLAG_FORCE_SIG_SEND                     (1 << 4)
-#define ERTS_PI_FLAG_REQUEST_FOR_OTHER                  (1 << 5)
+#define ERTS_PI_FLAG_NEED_MSGQ_LEN                      (1 << 2)
+#define ERTS_PI_FLAG_FORCE_SIG_SEND                     (1 << 3)
+#define ERTS_PI_FLAG_REQUEST_FOR_OTHER                  (1 << 4)
+#define ERTS_PI_FLAG_MSGS_IX                                  5 /* must be last */
 
 #define ERTS_PI_UNRESERVE(RS, SZ) \
     (ASSERT((RS) >= (SZ)), (RS) -= (SZ))
@@ -763,7 +763,7 @@ static ErtsProcessInfoArgs pi_args[] = {
     {am_current_function, 4, ERTS_PI_FLAG_FORCE_SIG_SEND, ERTS_PROC_LOCK_MAIN},
     {am_initial_call, 4, 0, ERTS_PROC_LOCK_MAIN},
     {am_status, 0, 0, 0},
-    {am_messages, 0, ERTS_PI_FLAG_WANT_MSGS|ERTS_PI_FLAG_NEED_MSGQ_LEN|ERTS_PI_FLAG_FORCE_SIG_SEND, ERTS_PROC_LOCK_MAIN},
+    {am_messages, 0, ERTS_PI_FLAG_NEED_MSGQ_LEN|ERTS_PI_FLAG_FORCE_SIG_SEND, ERTS_PROC_LOCK_MAIN},
     {am_message_queue_len, 0, ERTS_PI_FLAG_NEED_MSGQ_LEN, ERTS_PROC_LOCK_MAIN},
     {am_links, 0, ERTS_PI_FLAG_FORCE_SIG_SEND, ERTS_PROC_LOCK_MAIN},
     {am_monitors, 0, ERTS_PI_FLAG_FORCE_SIG_SEND, ERTS_PROC_LOCK_MAIN},
@@ -990,7 +990,8 @@ erts_process_info(Process *c_p,
                   Uint *reds)
 {
     Eterm res;
-    Eterm part_res[ERTS_PI_ARGS];
+    Eterm def_arr[ERTS_PI_DEF_ARR_SZ];
+    Eterm *part_res;
     int item_ix, ix;
 
     if (ERTS_PI_FLAG_SINGELTON & flags) {
@@ -1000,7 +1001,11 @@ erts_process_info(Process *c_p,
         return res;
     }
 
-    for (ix = 0; ix < ERTS_PI_ARGS; ix++)
+    part_res = def_arr;
+    if (item_len > sizeof(def_arr) / sizeof(def_arr[0]))
+        part_res = erts_alloc(ERTS_ALC_T_TMP, item_len * sizeof(def_arr[0]));
+
+    for (ix = 0; ix < item_len; ix++)
 	part_res[ix] = THE_NON_VALUE;
 
     /*
@@ -1010,8 +1015,8 @@ erts_process_info(Process *c_p,
      * change the result of 'message_queue_len' (in case
      * the queue contain bad distribution messages).
      */
-    if (flags & ERTS_PI_FLAG_WANT_MSGS) {
-	ix = pi_arg2ix(am_messages);
+    if ((flags >> ERTS_PI_FLAG_MSGS_IX) != 0) {
+	ix = (flags >> ERTS_PI_FLAG_MSGS_IX) - 1;
 	ASSERT(part_res[ix] == THE_NON_VALUE);
 	res = process_info_aux(c_p, hfact, rp, rp_locks, ix,
                                THE_NON_VALUE, flags, &reserve_size, reds);
@@ -1022,12 +1027,12 @@ erts_process_info(Process *c_p,
 
     for (item_ix = item_len - 1; item_ix >= 0; item_ix--) {
 	ix = item[item_ix].ix;
-	if (part_res[ix] == THE_NON_VALUE) {
+	if (part_res[item_ix] == THE_NON_VALUE) {
 	    res = process_info_aux(c_p, hfact, rp, rp_locks, ix,
                                    item[item_ix].arg, flags, &reserve_size, reds);
             ASSERT(res != am_undefined);
 	    ASSERT(res != THE_NON_VALUE);
-            part_res[ix] = res;
+            part_res[item_ix] = res;
 	}
     }
 
@@ -1035,13 +1040,13 @@ erts_process_info(Process *c_p,
 
     for (item_ix = item_len - 1; item_ix >= 0; item_ix--) {
 	ix = item[item_ix].ix;
-	ASSERT(part_res[ix] != THE_NON_VALUE);
+	ASSERT(part_res[item_ix] != THE_NON_VALUE);
 	/*
 	 * If we should ignore the value of registered_name,
 	 * its value is nil. For more info, see comment in the
 	 * beginning of process_info_aux().
 	 */
-	if (is_nil(part_res[ix])) {
+	if (is_nil(part_res[item_ix])) {
 	    ASSERT(!(flags & ERTS_PI_FLAG_ALWAYS_WRAP));
 	    ASSERT(pi_ix2arg(ix) == am_registered_name);
 	}
@@ -1049,9 +1054,12 @@ erts_process_info(Process *c_p,
             Eterm *hp;
             ERTS_PI_UNRESERVE(reserve_size, 2);
             hp = erts_produce_heap(hfact, 2, reserve_size);
-	    res = CONS(hp, part_res[ix], res);
+	    res = CONS(hp, part_res[item_ix], res);
 	}
     }
+
+    if (part_res != def_arr)
+        erts_free(ERTS_ALC_T_TMP, part_res);
 
     return res;
 }
@@ -1121,6 +1129,8 @@ process_info_bif(Process *c_p, Eterm pid, Eterm opt, int always_wrap, int pi2)
         reserve_size = 3 + pi_ix2rsz(ix);
         flags = ERTS_PI_FLAG_SINGELTON;
         flags |= pi_ix2flags(ix);
+        if (ix == ERTS_PI_IX_MESSAGES)
+            flags |= (len - 1 + 1) << ERTS_PI_FLAG_MSGS_IX;
         if (ix < 0)
             goto badarg;
     }
@@ -1158,6 +1168,8 @@ process_info_bif(Process *c_p, Eterm pid, Eterm opt, int always_wrap, int pi2)
 
             locks |= pi_ix2locks(ix);
             flags |= pi_ix2flags(ix);
+            if (ix == ERTS_PI_IX_MESSAGES)
+                flags |= (len - 1 + 1) << ERTS_PI_FLAG_MSGS_IX;
             reserve_size += pi_ix2rsz(ix);
             reserve_size += 3; /* 2-tuple */
             reserve_size += 2; /* cons */
